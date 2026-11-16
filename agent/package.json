@@ -1,0 +1,28 @@
+{
+  "name": "drift-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude-driven video builder for Drift: pick a skill, point it at a document, video or repo, approve a storyboard, and Claude builds the timeline over Drift's MCP server.",
+  "type": "module",
+  "bin": {
+    "drift-agent": "dist/cli.js"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.325",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

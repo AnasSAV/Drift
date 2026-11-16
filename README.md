@@ -203,6 +203,7 @@ Build, packaging, architecture, and agent protocol live in `docs/`:
 - [GPU effects](docs/gpu-effects.md)
 - [GPU transitions](docs/gpu-transitions.md)
 - [Agent access / MCP](docs/MCP.md)
+- [drift-agent: Claude builds a video from a document, video or repo](agent/README.md)
 
 ## Help and feedback
 
