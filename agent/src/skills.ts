@@ -29,7 +29,7 @@ export interface Skill {
 const here = dirname(fileURLToPath(import.meta.url));
 // src/ when run through tsx, dist/ when built: the bundled skills sit beside either.
 export const bundledSkillsDir = resolve(here, "..", "skills");
-export const userSkillsDir = join(homedir(), ".drift-agent", "skills");
+export const userSkillsDir = join(process.env.DRIFT_AGENT_HOME || join(homedir(), ".drift-agent"), "skills");
 
 export function skillRoots(): string[] {
   const extra = (process.env.DRIFT_AGENT_SKILLS ?? "").split(delimiter).filter(Boolean);
@@ -37,22 +37,81 @@ export function skillRoots(): string[] {
   return [...extra, userSkillsDir, bundledSkillsDir];
 }
 
-export function listSkills(): Skill[] {
-  const seen = new Map<string, Skill>();
+// Where a skill came from: shipped in agent/skills, the user's own folder, or a DRIFT_AGENT_SKILLS
+// root.
+export type SkillOrigin = "bundled" | "user" | "extra";
+
+export interface SkillEntry extends Skill {
+  origin: SkillOrigin;
+  file: string;
+  // A user or extra skill with the same name as a bundled one, which it hides.
+  overridesBundled: boolean;
+}
+
+export interface SkillProblem {
+  dir: string;
+  problem: string;
+}
+
+function originOf(root: string): SkillOrigin {
+  if (resolve(root) === resolve(userSkillsDir)) return "user";
+  if (resolve(root) === resolve(bundledSkillsDir)) return "bundled";
+  return "extra";
+}
+
+// Every skill folder in every root, in priority order, with what is wrong with the ones that
+// don't parse. Folders starting with "." (the trash) are skipped.
+function scan(): { entries: SkillEntry[]; problems: SkillProblem[] } {
+  const entries: SkillEntry[] = [];
+  const problems: SkillProblem[] = [];
   for (const root of skillRoots()) {
     if (!existsSync(root)) continue;
-    for (const entry of readdirSync(root)) {
-      const dir = join(root, entry);
+    for (const name of readdirSync(root)) {
+      if (name.startsWith(".")) continue;
+      const dir = join(root, name);
       const file = join(dir, "SKILL.md");
-      if (!statSync(dir).isDirectory() || !existsSync(file)) continue;
-      const skill = parseSkill(readFileSync(file, "utf8"), dir);
-      if (skill && !seen.has(skill.name)) seen.set(skill.name, skill);
+      try {
+        if (!statSync(dir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      if (!existsSync(file)) {
+        problems.push({ dir, problem: "no SKILL.md in this folder" });
+        continue;
+      }
+      const text = readFileSync(file, "utf8");
+      const skill = parseSkill(text, dir);
+      if (!skill) {
+        problems.push({
+          dir,
+          problem: /^---\r?\n[\s\S]*?\r?\n---/.test(text)
+            ? "the frontmatter has no name:"
+            : "SKILL.md must start with --- frontmatter (name:, description:) ---",
+        });
+        continue;
+      }
+      entries.push({ ...skill, origin: originOf(root), file, overridesBundled: false });
     }
+  }
+  return { entries, problems };
+}
+
+export function listSkills(): SkillEntry[] {
+  const { entries } = scan();
+  const seen = new Map<string, SkillEntry>();
+  for (const e of entries) {
+    const first = seen.get(e.name);
+    if (!first) seen.set(e.name, e);
+    else if (e.origin === "bundled") first.overridesBundled = true;
   }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function findSkill(name: string): Skill | undefined {
+export function skillProblems(): SkillProblem[] {
+  return scan().problems;
+}
+
+export function findSkill(name: string): SkillEntry | undefined {
   return listSkills().find((s) => s.name === name);
 }
 

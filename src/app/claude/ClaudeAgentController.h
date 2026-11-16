@@ -46,15 +46,30 @@ class ClaudeAgentController : public QObject
 
     // The run. state: idle | planning | review | building | done | failed
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)
-    Q_PROPERTY(bool running READ running NOTIFY stateChanged)
-    Q_PROPERTY(QString statusText READ statusText NOTIFY stateChanged)
-    Q_PROPERTY(QString errorText READ errorText NOTIFY stateChanged)
-    Q_PROPERTY(QString report READ report NOTIFY stateChanged)
-    Q_PROPERTY(double costUsd READ costUsd NOTIFY stateChanged)
-    Q_PROPERTY(QString runFolder READ runFolder NOTIFY stateChanged)
-    Q_PROPERTY(QString projectPath READ projectPath NOTIFY stateChanged)
+    Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(QString statusText READ statusText NOTIFY detailsChanged)
+    Q_PROPERTY(QString errorText READ errorText NOTIFY detailsChanged)
+    Q_PROPERTY(QString report READ report NOTIFY detailsChanged)
+    Q_PROPERTY(double costUsd READ costUsd NOTIFY detailsChanged)
+    Q_PROPERTY(QString runFolder READ runFolder NOTIFY detailsChanged)
+    Q_PROPERTY(QString projectPath READ projectPath NOTIFY detailsChanged)
     Q_PROPERTY(QString runModel READ runModel NOTIFY runModelChanged)
     Q_PROPERTY(QString runEffort READ runEffort NOTIFY runModelChanged)
+    // Running totals for the run: tokens, and cost (exact for finished phases plus an estimate for
+    // the one in progress; -1 when the model has no known price). runStartedAt in ms since epoch.
+    Q_PROPERTY(qint64 liveTokens READ liveTokens NOTIFY usageChanged)
+    Q_PROPERTY(double liveCost READ liveCost NOTIFY usageChanged)
+    Q_PROPERTY(bool costEstimated READ costEstimated NOTIFY usageChanged)
+    Q_PROPERTY(qint64 runStartedAt READ runStartedAt NOTIFY detailsChanged)
+    // After a build the helper stays open so you can ask for changes; false once it has exited.
+    Q_PROPERTY(bool canRequestChanges READ canRequestChanges NOTIFY runningChanged)
+
+    // Skill management (drift-agent skill …). Skills entries carry origin (bundled|user|extra),
+    // enabled, file, overridesBundled; problems lists skill folders that don't parse.
+    Q_PROPERTY(QVariantList skillProblems READ skillProblems NOTIFY infoChanged)
+    Q_PROPERTY(bool skillBusy READ skillBusy NOTIFY skillChanged)
+    Q_PROPERTY(QString skillMessage READ skillMessage NOTIFY skillChanged)
+    Q_PROPERTY(bool skillMessageIsError READ skillMessageIsError NOTIFY skillChanged)
     // Activity entries: {kind: status|text|tool|denied|error, text, detail, pending, ok, time}
     Q_PROPERTY(QVariantList log READ log NOTIFY logChanged)
     // The storyboard awaiting review (agent/src/storyboard.ts shape), empty otherwise.
@@ -94,6 +109,15 @@ public:
     QString runEffort() const { return m_runEffort; }
     QVariantList log() const { return m_log; }
     QVariantMap storyboard() const { return m_storyboard; }
+    qint64 liveTokens() const { return m_liveTokens; }
+    double liveCost() const { return m_liveCost; }
+    bool costEstimated() const { return m_costEstimated; }
+    qint64 runStartedAt() const { return m_runStartedAt; }
+    bool canRequestChanges() const;
+    QVariantList skillProblems() const { return m_skillProblems; }
+    bool skillBusy() const { return m_skillProc != nullptr; }
+    QString skillMessage() const { return m_skillMessage; }
+    bool skillMessageIsError() const { return m_skillMessageIsError; }
 
     // Re-reads skills, models and login (`drift-agent info`). Free: nothing is sent to a model.
     Q_INVOKABLE void refresh();
@@ -107,8 +131,20 @@ public:
     // Switches the model for the rest of the run; applies from the helper's next turn.
     Q_INVOKABLE void setRunModel(const QString &model, const QString &effort);
     Q_INVOKABLE void cancel();
-    // Back to the form after a run has finished.
+    // After a build: another round of changes on the timeline, in plain words.
+    Q_INVOKABLE void requestChanges(const QString &note);
+    // Back to the form. Ends a finished run's open session first.
     Q_INVOKABLE void reset();
+
+    // Skills. Each runs `drift-agent skill …`, then refresh(); errors land in skillMessage.
+    // createSkill and customizeSkill open the new SKILL.md for editing when they succeed.
+    Q_INVOKABLE void createSkill(const QString &name, const QString &description, const QStringList &sources);
+    Q_INVOKABLE void customizeSkill(const QString &name);
+    Q_INVOKABLE void removeSkill(const QString &name);
+    Q_INVOKABLE void setSkillEnabled(const QString &name, bool enabled);
+    // Opens a skill's SKILL.md in the system's editor for .md files (its folder if there is none).
+    Q_INVOKABLE void editSkill(const QString &name) const;
+    Q_INVOKABLE void openSkillFolder(const QString &name) const;
 
     // Opens Claude's sign-in in a console window (it opens the browser). refresh() afterwards.
     Q_INVOKABLE void login();
@@ -120,11 +156,17 @@ signals:
     void setupChanged();
     void infoChanged();
     void stateChanged();
+    void detailsChanged();
+    void runningChanged();
     void runModelChanged();
     void logChanged();
     void storyboardChanged();
+    void usageChanged();
+    void skillChanged();
 
 private:
+    void runSkillCommand(const QStringList &args, bool openAfter);
+    QVariantMap skillByName(const QString &name) const;
     struct Launch
     {
         QString program;
@@ -176,4 +218,13 @@ private:
     QVariantList m_log;
     QHash<QString, int> m_toolRows; // tool_use id → row in m_log
     QVariantMap m_storyboard;
+    qint64 m_liveTokens = 0;
+    double m_liveCost = 0;
+    bool m_costEstimated = false;
+    qint64 m_runStartedAt = 0;
+
+    QPointer<QProcess> m_skillProc;
+    QVariantList m_skillProblems;
+    QString m_skillMessage;
+    bool m_skillMessageIsError = false;
 };

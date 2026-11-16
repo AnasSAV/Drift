@@ -9,7 +9,8 @@ You can use it two ways:
 
 - **Inside Drift**: the **Claude** panel (in the AI workspace, or add it to any layout). It runs
   this helper for you over the `--json` protocol below. You pick a skill, a source, a model and an
-  effort, edit the storyboard scene by scene, and watch the build. The back end is
+  effort, edit the storyboard scene by scene, and watch the build with the cost so far. Then you
+  ask for changes until you're happy. Its wand button opens the skill manager. The back end is
   [src/app/claude/ClaudeAgentController](../src/app/claude/ClaudeAgentController.h). The panel
   finds this folder next to the Drift build (or set `DRIFT_AGENT_DIR`) and needs Node.js and
   `npm install` here.
@@ -109,6 +110,15 @@ A run:
 4. **Builds**: scene by scene (one undo step per batch), with a bookmark at each scene start.
    Claude checks its work with contact sheets, saves the project and reports anything that
    differs from the storyboard.
+5. **Changes**: the session stays open, so you can keep asking for changes in plain words, such
+   as "make the titles bigger" or "swap scenes 2 and 3". Claude still knows the source and the
+   storyboard. It re-reads the timeline first and keeps any edits you've made by hand. Each
+   change is an undo step and is saved to the same project. Press Enter (in the panel:
+   **Finish**) when you're done.
+
+The cost so far shows while Claude works. It's exact for finished phases and estimated for the
+one in progress (marked ≈). With a Claude subscription it's what the same usage would cost on
+the API; your plan counts it against your usage limits instead of billing it.
 
 Each run keeps its files in `~/Videos/Drift Agent/<time>-<skill>/` (or `--out`):
 
@@ -181,17 +191,44 @@ The chosen skill's instructions go into Claude's system prompt, after a general 
 (how to batch ops, check its work, build diagrams as inline SVG, and use voiceover). See
 [src/prompts.ts](src/prompts.ts). A skill only needs to say what makes *its* video good.
 
+### Managing skills
+
+In Drift, the wand button in the Claude panel opens the skill manager. From a terminal:
+
+```bash
+npm start -- skill new product-demo --description "A 45-second product demo" --sources url,repo
+npm start -- skill customize repo-walkthrough   # your editable copy replaces the built-in one
+npm start -- skill disable footage-highlight-reel   # hidden from pickers; enable brings it back
+npm start -- skill remove product-demo          # moves it to ~/.drift-agent/skills/.trash
+npm start -- skill path doc-explainer           # where its SKILL.md is
+```
+
+- **New skills** start from a template with the usual sections.
+- **Built-in skills** are never changed in place. You customise a copy, and removing the copy
+  brings the original back.
+- **Folders that don't parse** (no `SKILL.md`, missing frontmatter or name) show as problems in
+  `skills` and in the manager, rather than vanishing silently.
+- **`DRIFT_AGENT_HOME`** moves `~/.drift-agent` (your config and skills) somewhere else.
+
 ## JSON mode
 
-`run --json` is the interface the Drift panel will use. Events go to stdout, one JSON object per
+`run --json` is the interface the Drift panel uses. Events go to stdout, one JSON object per
 line (types in [src/events.ts](src/events.ts)):
 
 ```json
 {"type":"status","phase":"plan","message":"Planning with skill \"doc-explainer\"…"}
 {"type":"tool","phase":"plan","id":"toolu_…","name":"drift.apply","summary":"[list_text_presets]"}
+{"type":"usage","phase":"plan","tokens":48210,"outputTokens":1830,"costUsd":0.07,"estimated":true}
 {"type":"storyboard","storyboard":{…},"file":"…/storyboard.json"}
 {"type":"done","phase":"build","costUsd":0.84,"turns":31,"result":"…report…"}
+{"type":"ready_for_changes","projectPath":"…/video.drift"}
+{"type":"finished","ok":true,"phase":"build","costUsd":0.91,"runDir":"…","projectPath":"…"}
 ```
+
+- **`usage`** carries running totals for the whole run. `costUsd` is `null` when the model has
+  no known price.
+- **`ready_for_changes`** follows the build and each round of changes.
+- **`finished`** comes when the run ends.
 
 Commands go to stdin, one per line:
 
@@ -199,18 +236,23 @@ Commands go to stdin, one per line:
 {"type":"approve"}
 {"type":"approve","storyboard":{…edited…},"model":"claude-opus-5-5","effort":"high"}
 {"type":"revise","note":"Make it vertical and cut scene 3"}
+{"type":"change","note":"Make the titles bigger"}
+{"type":"finish"}
 {"type":"set_model","model":"claude-sonnet-5-5","effort":"medium"}
 {"type":"cancel"}
 ```
 
-`set_model` can be sent at any time and applies from the next turn; each turn starts with a
-`{"type":"model",…}` event saying which model it uses. `drift-agent models --json` gives the
-panel the account's models and the current default to fill its model menu.
+- **`set_model`** can be sent at any time and applies from the next turn. Each turn starts with
+  a `{"type":"model",…}` event saying which model it uses.
+- **`change`** and **`finish`** are for after `ready_for_changes`.
+- **`info`** (`drift-agent info`) gives the panel everything for its form in one call: skills
+  with origin and enabled state, skill problems, models, the default and the login.
+  `skill … --json` answers the manager's actions.
 
 ## Development
 
 ```bash
-npm test           # policy, skills, storyboard, sources, model choice and pickers
+npm test           # policy, skills and skill manager, storyboard, sources, models, cost estimate
 npm run typecheck
 npm run build      # emits dist/; then `node dist/cli.js …`
 ```

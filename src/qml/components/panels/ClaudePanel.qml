@@ -14,8 +14,39 @@ PanelFrame {
     property var draft: ({})
     property int draftRev: 0
     property bool showLog: false
+    // The skill manager replaces the form while open.
+    property bool managing: false
+    readonly property var enabledSkills: ClaudeAgent.skills.filter(s => s.enabled !== false)
+    // Ticks once a second while Claude works, for the elapsed time.
+    property double now: Date.now()
+    // The skill a Remove button asked about (inline components reach the dialog through these).
+    property string pendingRemoval: ""
+    function openRemoveDialog() { removeDialog.open() }
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: root.working
+        onTriggered: root.now = Date.now()
+    }
 
     function copy(v) { return JSON.parse(JSON.stringify(v)) }
+    function tokensText(n) {
+        return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : (n >= 1000 ? Math.round(n / 1000) + "k" : String(n))
+    }
+    function costText() {
+        if (ClaudeAgent.liveCost < 0) return ""
+        return (ClaudeAgent.costEstimated ? "≈ " : "") + "$" + ClaudeAgent.liveCost.toFixed(2)
+    }
+    // "$0.42 · 128k tokens · 2:05" for the run so far.
+    function usageText() {
+        const parts = []
+        const c = root.costText()
+        if (c.length > 0) parts.push(c)
+        if (ClaudeAgent.liveTokens > 0) parts.push(qsTr("%1 tokens").arg(root.tokensText(ClaudeAgent.liveTokens)))
+        if (ClaudeAgent.runStartedAt > 0) parts.push(root.fmtTime(Math.max(0, (root.now - ClaudeAgent.runStartedAt) / 1000)))
+        return parts.join(" · ")
+    }
     function touch() { root.draftRev++ }
     function total(sb) {
         let t = 0
@@ -23,8 +54,10 @@ PanelFrame {
         return t
     }
     function fmtTime(sec) {
-        const m = Math.floor(sec / 60)
-        const s = Math.round(sec - m * 60)
+        // Whole seconds first, so 59.6 s reads 1:00, not 0:60.
+        const total = Math.round(sec)
+        const m = Math.floor(total / 60)
+        const s = total - m * 60
         return m + ":" + (s < 10 ? "0" : "") + s
     }
     function indexOfId(list, key, value) {
@@ -86,9 +119,10 @@ PanelFrame {
             font.family: Theme.fontFamily
             font.pixelSize: Theme.fontSizeXs
             text: {
-                if (root.working || root.st === "review") {
-                    const m = ClaudeAgent.runModel.length > 0 ? " · " + ClaudeAgent.runModel : ""
-                    return ClaudeAgent.statusText + m
+                if (root.managing) return qsTr("Skills")
+                if (root.working || root.st === "review" || root.st === "done") {
+                    const u = root.usageText()
+                    return ClaudeAgent.statusText + (u.length > 0 ? " · " + u : "")
                 }
                 if (ClaudeAgent.loading) return qsTr("Checking Claude…")
                 if (!ClaudeAgent.ready) return qsTr("Not set up")
@@ -112,10 +146,11 @@ PanelFrame {
                 onClicked: ClaudeAgent.login()
             }
             IconButton {
-                glyph: Theme.icons.folder
-                tooltip: qsTr("Open your skills folder: add a folder with a SKILL.md to make a new skill")
-                enabled: ClaudeAgent.ready
-                onClicked: ClaudeAgent.openSkillsFolder()
+                glyph: Theme.icons.wand
+                active: root.managing
+                tooltip: root.managing ? qsTr("Back") : qsTr("Manage skills: create, customize, enable or remove")
+                enabled: ClaudeAgent.ready && root.st === "idle"
+                onClicked: root.managing = !root.managing
             }
             IconButton {
                 glyph: Theme.icons.refresh
@@ -174,20 +209,143 @@ PanelFrame {
             width: scroller.width - 2 * Theme.pagePadding
             spacing: Theme.spacingMd
 
+            // ===== skill manager =====
+            Column {
+                id: manager
+                width: parent.width
+                spacing: Theme.spacingMd
+                visible: root.managing && root.st === "idle"
+
+                Text {
+                    width: parent.width
+                    wrapMode: Text.WordWrap
+                    color: Theme.mutedForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeXs
+                    text: qsTr("A skill is a folder with a SKILL.md: instructions for one kind of video. Edit opens it in your text editor; reload here after saving.")
+                }
+
+                // New skill
+                Rectangle {
+                    width: parent.width
+                    height: newCol.implicitHeight + 2 * Theme.spacingSm
+                    radius: Theme.radiusMd
+                    color: Theme.panelSecondaryBg
+                    border.color: Theme.panelSecondaryBorder
+                    border.width: Theme.borderWidth
+
+                    Column {
+                        id: newCol
+                        x: Theme.spacingSm
+                        y: Theme.spacingSm
+                        width: parent.width - 2 * Theme.spacingSm
+                        spacing: Theme.spacingXs
+
+                        FieldLabel { text: qsTr("New skill") }
+                        ThemedTextField {
+                            id: newName
+                            width: parent.width
+                            placeholderText: qsTr("name, e.g. product-demo")
+                            validator: RegularExpressionValidator { regularExpression: /[a-z0-9-]{0,48}/ }
+                        }
+                        ThemedTextField {
+                            id: newDescription
+                            width: parent.width
+                            placeholderText: qsTr("What it makes, in one sentence")
+                        }
+                        Flow {
+                            width: parent.width
+                            spacing: Theme.spacingSm
+                            Repeater {
+                                id: newSources
+                                model: [
+                                    { id: "document", label: qsTr("Documents") },
+                                    { id: "repo", label: qsTr("Repos") },
+                                    { id: "video", label: qsTr("Video") },
+                                    { id: "url", label: qsTr("Web pages") }
+                                ]
+                                delegate: ThemedCheckBox {
+                                    required property var modelData
+                                    property string sourceId: modelData.id
+                                    text: modelData.label
+                                }
+                            }
+                        }
+                        ThemedButton {
+                            width: parent.width
+                            variant: "primary"
+                            glyph: Theme.icons.plus
+                            text: qsTr("Create and edit")
+                            enabled: /^[a-z0-9][a-z0-9-]{1,47}$/.test(newName.text) && !ClaudeAgent.skillBusy
+                            onClicked: {
+                                const sources = []
+                                for (let i = 0; i < newSources.count; ++i) {
+                                    const box = newSources.itemAt(i)
+                                    if (box && box.checked) sources.push(box.sourceId)
+                                }
+                                ClaudeAgent.createSkill(newName.text, newDescription.text, sources)
+                                newName.text = ""
+                                newDescription.text = ""
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    width: parent.width
+                    visible: ClaudeAgent.skillMessage.length > 0
+                    wrapMode: Text.WordWrap
+                    color: ClaudeAgent.skillMessageIsError ? Theme.destructive : Theme.mutedForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeXs
+                    text: ClaudeAgent.skillMessage
+                }
+
+                Repeater {
+                    model: ClaudeAgent.skills
+                    delegate: SkillRow {
+                        required property var modelData
+                        width: manager.width
+                        skill: modelData
+                        panel: root
+                    }
+                }
+
+                // Folders that hold no valid skill.
+                Repeater {
+                    model: ClaudeAgent.skillProblems
+                    delegate: Text {
+                        required property var modelData
+                        width: manager.width
+                        wrapMode: Text.WrapAnywhere
+                        color: Theme.warning
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.fontSizeXs
+                        text: "⚠ " + modelData.dir + ": " + modelData.problem
+                    }
+                }
+
+                ThemedButton {
+                    glyph: Theme.icons.folder
+                    text: qsTr("Open my skills folder")
+                    onClicked: ClaudeAgent.openSkillsFolder()
+                }
+            }
+
             // ===== form (idle) =====
             Column {
                 id: form
                 width: parent.width
                 spacing: Theme.spacingMd
-                visible: root.st === "idle"
+                visible: root.st === "idle" && !root.managing
 
-                property var skill: skillBox.currentIndex >= 0 ? ClaudeAgent.skills[skillBox.currentIndex] : null
+                property var skill: skillBox.currentIndex >= 0 ? root.enabledSkills[skillBox.currentIndex] : null
 
                 FieldLabel { text: qsTr("Skill") }
                 ThemedComboBox {
                     id: skillBox
                     width: parent.width
-                    model: ClaudeAgent.skills
+                    model: root.enabledSkills
                     textRole: "name"
                 }
                 Text {
@@ -417,17 +575,50 @@ PanelFrame {
                         text: ClaudeAgent.report
                     }
                     Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
                         color: Theme.mutedForeground
                         font.family: Theme.fontFamily
                         font.pixelSize: Theme.fontSizeXs
-                        text: qsTr("Cost ≈ $%1").arg(ClaudeAgent.costUsd.toFixed(2))
+                        text: {
+                            const parts = []
+                            if (ClaudeAgent.liveCost >= 0) parts.push(qsTr("Cost $%1").arg(ClaudeAgent.liveCost.toFixed(2)))
+                            else parts.push(qsTr("Cost $%1").arg(ClaudeAgent.costUsd.toFixed(2)))
+                            if (ClaudeAgent.liveTokens > 0) parts.push(qsTr("%1 tokens").arg(root.tokensText(ClaudeAgent.liveTokens)))
+                            return parts.join(" · ") + (ClaudeAgent.account.indexOf("login") >= 0
+                                   ? "  " + qsTr("(API-equivalent; a Claude plan counts it against your usage limits instead)") : "")
+                        }
                     }
+
+                    // Another round on the built timeline, while the session is still open.
+                    Column {
+                        width: parent.width
+                        spacing: Theme.spacingXs
+                        visible: ClaudeAgent.canRequestChanges
+
+                        FieldLabel { text: qsTr("Changes") }
+                        ThemedTextArea {
+                            id: changesField
+                            width: parent.width
+                            height: Math.max(56, implicitHeight)
+                            wrapMode: TextEdit.Wrap
+                            placeholderText: qsTr("e.g. \"Make the titles bigger and swap scenes 2 and 3\". Your own edits on the timeline are kept.")
+                        }
+                        ThemedButton {
+                            width: parent.width
+                            glyph: Theme.icons.pencil
+                            text: qsTr("Apply changes")
+                            enabled: changesField.text.trim().length > 0
+                            onClicked: { ClaudeAgent.requestChanges(changesField.text); changesField.text = "" }
+                        }
+                    }
+
                     Row {
                         spacing: Theme.spacingSm
                         ThemedButton {
-                            variant: "primary"
-                            glyph: Theme.icons.plus
-                            text: qsTr("New video")
+                            variant: ClaudeAgent.canRequestChanges ? "secondary" : "primary"
+                            glyph: ClaudeAgent.canRequestChanges ? Theme.icons.check : Theme.icons.plus
+                            text: ClaudeAgent.canRequestChanges ? qsTr("Finish") : qsTr("New video")
                             onClicked: ClaudeAgent.reset()
                         }
                         ThemedButton {
@@ -503,6 +694,22 @@ PanelFrame {
             wrapMode: Text.WordWrap
             size: "sm"
             text: qsTr("Claude builds in a new project, and this one has unsaved changes. Save it first if you want to keep them.")
+        }
+    }
+
+    ThemedDialog {
+        id: removeDialog
+        title: qsTr("Remove “%1”?").arg(root.pendingRemoval)
+        acceptText: qsTr("Remove")
+        acceptVariant: "destructive"
+        preferredWidth: Theme.dialogWidthSm
+        acceptOnReturn: false
+        onAccepted: ClaudeAgent.removeSkill(root.pendingRemoval)
+        contentItem: ThemedLabel {
+            width: parent ? parent.width : Theme.dialogWidthSm
+            wrapMode: Text.WordWrap
+            size: "sm"
+            text: qsTr("It moves to the .trash folder inside your skills folder, so you can get it back from there.")
         }
     }
 
@@ -638,6 +845,110 @@ PanelFrame {
                 font.family: Theme.monoFontFamily
                 font.pixelSize: Theme.fontSizeTiny
                 text: card.scene.sourceRefs ? "↳ " + card.scene.sourceRefs.join(", ") : ""
+            }
+        }
+    }
+
+    // One skill in the manager. Built-in skills are customized (copied to your folder, where the
+    // copy replaces them); your own are edited and removed.
+    component SkillRow: Rectangle {
+        id: sr
+        property var skill: ({})
+        property var panel
+        readonly property bool mine: skill.origin === "user"
+        height: srCol.implicitHeight + 2 * Theme.spacingSm
+        radius: Theme.radiusMd
+        color: Theme.panelSecondaryBg
+        border.color: Theme.panelSecondaryBorder
+        border.width: Theme.borderWidth
+        opacity: skill.enabled === false ? 0.6 : 1
+
+        Column {
+            id: srCol
+            x: Theme.spacingSm
+            y: Theme.spacingSm
+            width: parent.width - 2 * Theme.spacingSm
+            spacing: Theme.spacingXs
+
+            Item {
+                width: parent.width
+                height: Math.max(nameText.implicitHeight, enabledSwitch.implicitHeight)
+                Text {
+                    id: nameText
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Theme.foreground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeSm
+                    font.weight: Font.DemiBold
+                    text: sr.skill.name || ""
+                }
+                Text {
+                    anchors.left: nameText.right
+                    anchors.leftMargin: Theme.spacingSm
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: Theme.mutedForeground
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.fontSizeTiny
+                    text: sr.skill.origin === "bundled" ? qsTr("built-in")
+                          : (sr.mine ? (sr.skill.overridesBundled ? qsTr("yours · replaces built-in") : qsTr("yours")) : qsTr("extra"))
+                }
+                ThemedSwitch {
+                    id: enabledSwitch
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: sr.skill.enabled !== false
+                    enabled: !ClaudeAgent.skillBusy
+                    onToggled: ClaudeAgent.setSkillEnabled(sr.skill.name, checked)
+                    tooltip: checked ? qsTr("Shown in the skill list") : qsTr("Hidden from the skill list")
+                }
+            }
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+                color: Theme.mutedForeground
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSizeXs
+                text: (sr.skill.description || "") + (sr.skill.sources && sr.skill.sources.length
+                      ? "  ·  " + sr.skill.sources.join(", ") : "")
+            }
+            Flow {
+                width: parent.width
+                spacing: Theme.spacingXs
+                IconButton {
+                    visible: !sr.mine && sr.skill.origin === "bundled"
+                    glyph: Theme.icons.pencil
+                    text: qsTr("Customize")
+                    tooltip: qsTr("Copy it to your skills folder and edit the copy; the original stays as it is")
+                    enabled: !ClaudeAgent.skillBusy
+                    onClicked: ClaudeAgent.customizeSkill(sr.skill.name)
+                }
+                IconButton {
+                    visible: sr.skill.origin !== "bundled"
+                    glyph: Theme.icons.pencil
+                    text: qsTr("Edit")
+                    tooltip: sr.skill.file || ""
+                    onClicked: ClaudeAgent.editSkill(sr.skill.name)
+                }
+                IconButton {
+                    glyph: Theme.icons.folder
+                    text: qsTr("Folder")
+                    onClicked: ClaudeAgent.openSkillFolder(sr.skill.name)
+                }
+                IconButton {
+                    visible: sr.mine
+                    glyph: Theme.icons.trash
+                    text: qsTr("Remove")
+                    tooltip: sr.skill.overridesBundled ? qsTr("Moves your copy to the trash folder; the built-in skill comes back")
+                                                      : qsTr("Moves it to the trash folder in your skills folder")
+                    enabled: !ClaudeAgent.skillBusy
+                    onClicked: {
+                        sr.panel.pendingRemoval = sr.skill.name
+                        sr.panel.openRemoveDialog()
+                    }
+                }
             }
         }
     }

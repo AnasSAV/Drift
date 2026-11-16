@@ -52,7 +52,7 @@ ClaudeAgentController::ClaudeAgentController(AppController *app, QObject *parent
     // rather than in the static destructor after the application object is gone.
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this]() {
 #if QT_CONFIG(process)
-        for (QProcess *proc : {m_proc.data(), m_infoProc.data()}) {
+        for (QProcess *proc : {m_proc.data(), m_infoProc.data(), m_skillProc.data()}) {
             if (proc && proc->state() != QProcess::NotRunning) {
                 proc->disconnect(this);
                 proc->kill();
@@ -228,6 +228,7 @@ void ClaudeAgentController::refresh()
         m_loggedIn = account.value(QStringLiteral("loggedIn")).toBool();
         m_account = str(account, "method");
         m_userSkillsDir = str(info, "userSkillsDir");
+        m_skillProblems = info.value(QStringLiteral("problems")).toList();
         m_setupError = str(info, "error");
         m_ready = true;
         emit infoChanged();
@@ -266,7 +267,9 @@ void ClaudeAgentController::setState(const QString &state)
     if (m_state == state)
         return;
     m_state = state;
+    // canRequestChanges depends on the state as well as on the process.
     emit stateChanged();
+    emit runningChanged();
 }
 
 bool ClaudeAgentController::start(const QString &skill, const QString &source, const QString &note,
@@ -294,12 +297,17 @@ bool ClaudeAgentController::start(const QString &skill, const QString &source, c
     m_cancelled = false;
     m_stdoutBuffer.clear();
     m_stderrTail.clear();
+    m_liveTokens = 0;
+    m_liveCost = 0;
+    m_costEstimated = false;
+    m_runStartedAt = QDateTime::currentMSecsSinceEpoch();
+    emit usageChanged();
     emit logChanged();
     emit storyboardChanged();
     if (!launch.error.isEmpty()) {
         m_errorText = launch.error;
         setState(QStringLiteral("failed"));
-        emit stateChanged();
+        emit detailsChanged();
         return false;
     }
 
@@ -311,7 +319,7 @@ bool ClaudeAgentController::start(const QString &skill, const QString &source, c
     if (!mcp || !mcp->running()) {
         m_errorText = tr("Couldn't turn on Agent access: %1").arg(mcp ? mcp->error() : tr("unavailable"));
         setState(QStringLiteral("failed"));
-        emit stateChanged();
+        emit detailsChanged();
         return false;
     }
 
@@ -364,8 +372,9 @@ bool ClaudeAgentController::start(const QString &skill, const QString &source, c
     emit runModelChanged();
     m_statusText = tr("Starting…");
     setState(QStringLiteral("planning"));
-    emit stateChanged();
+    emit detailsChanged();
     proc->start();
+    emit runningChanged();
     return true;
 #endif
 }
@@ -397,7 +406,7 @@ void ClaudeAgentController::approve(const QVariantMap &storyboard, const QString
     if (send(cmd)) {
         m_statusText = tr("Building…");
         setState(QStringLiteral("building"));
-        emit stateChanged();
+        emit detailsChanged();
     }
 }
 
@@ -409,7 +418,7 @@ void ClaudeAgentController::revise(const QString &note)
         appendLog(QStringLiteral("status"), tr("You asked for changes: %1").arg(note.trimmed()));
         m_statusText = tr("Revising the storyboard…");
         setState(QStringLiteral("planning"));
-        emit stateChanged();
+        emit detailsChanged();
     }
 }
 
@@ -430,7 +439,7 @@ void ClaudeAgentController::cancel()
         return;
     m_cancelled = true;
     m_statusText = tr("Stopping…");
-    emit stateChanged();
+    emit detailsChanged();
     send({{QStringLiteral("type"), QStringLiteral("cancel")}});
     // The helper stops at the next safe point; don't let a stuck one linger.
     QPointer<QProcess> proc = m_proc;
@@ -441,10 +450,44 @@ void ClaudeAgentController::cancel()
 #endif
 }
 
+bool ClaudeAgentController::canRequestChanges() const
+{
+    return m_state == QLatin1String("done") && running();
+}
+
+void ClaudeAgentController::requestChanges(const QString &note)
+{
+    if (!canRequestChanges() || note.trimmed().isEmpty())
+        return;
+    if (send({{QStringLiteral("type"), QStringLiteral("change")}, {QStringLiteral("note"), note.trimmed()}})) {
+        appendLog(QStringLiteral("status"), tr("You asked for changes: %1").arg(note.trimmed()));
+        m_statusText = tr("Making your changes…");
+        setState(QStringLiteral("building"));
+        emit detailsChanged();
+    }
+}
+
 void ClaudeAgentController::reset()
 {
-    if (running())
-        return;
+#if QT_CONFIG(process)
+    if (running()) {
+        // Only a finished run, waiting for changes, can be closed from here; it ends itself on
+        // "finish". Its exit no longer concerns the panel, which is back at the form.
+        if (m_state != QLatin1String("done"))
+            return;
+        QPointer<QProcess> proc = m_proc;
+        proc->disconnect(this);
+        send({{QStringLiteral("type"), QStringLiteral("finish")}});
+        proc->closeWriteChannel();
+        connect(proc, &QProcess::finished, proc, &QObject::deleteLater);
+        QTimer::singleShot(10000, proc, [proc]() {
+            if (proc && proc->state() != QProcess::NotRunning)
+                proc->kill();
+        });
+        m_proc = nullptr;
+        emit runningChanged();
+    }
+#endif
     m_log.clear();
     m_toolRows.clear();
     m_storyboard.clear();
@@ -454,7 +497,7 @@ void ClaudeAgentController::reset()
     emit logChanged();
     emit storyboardChanged();
     setState(QStringLiteral("idle"));
-    emit stateChanged();
+    emit detailsChanged();
 }
 
 void ClaudeAgentController::onFinished(int exitCode)
@@ -478,7 +521,9 @@ void ClaudeAgentController::onFinished(int exitCode)
     }
     emit logChanged();
 
-    if (m_state == QLatin1String("building") && exitCode == 0 && !m_cancelled) {
+    if (m_state == QLatin1String("done") && !m_cancelled) {
+        // A finished run whose session has now closed; nothing to change in the result.
+    } else if (m_state == QLatin1String("building") && exitCode == 0 && !m_cancelled) {
         m_statusText = tr("Done");
         setState(QStringLiteral("done"));
     } else if (m_cancelled) {
@@ -495,7 +540,9 @@ void ClaudeAgentController::onFinished(int exitCode)
         m_statusText = tr("Failed");
         setState(QStringLiteral("failed"));
     }
-    emit stateChanged();
+    emit detailsChanged();
+    // The process is gone: no more changes can be requested, whatever the state.
+    emit runningChanged();
 }
 
 // --- protocol ------------------------------------------------------------------------------------
@@ -540,7 +587,7 @@ void ClaudeAgentController::handleEvent(const QVariantMap &e)
     if (type == QLatin1String("status")) {
         m_statusText = str(e, "message");
         appendLog(QStringLiteral("status"), m_statusText);
-        emit stateChanged();
+        emit detailsChanged();
     } else if (type == QLatin1String("session")) {
         appendLog(QStringLiteral("status"), tr("Connected · %1").arg(str(e, "model")));
     } else if (type == QLatin1String("model")) {
@@ -575,22 +622,142 @@ void ClaudeAgentController::handleEvent(const QVariantMap &e)
         emit storyboardChanged();
         m_statusText = tr("Review the storyboard");
         setState(QStringLiteral("review"));
-        emit stateChanged();
+        emit detailsChanged();
     } else if (type == QLatin1String("done")) {
         m_costUsd += e.value(QStringLiteral("costUsd")).toDouble();
         if (phase == QLatin1String("build"))
             m_report = str(e, "result");
-        emit stateChanged();
+        emit detailsChanged();
+    } else if (type == QLatin1String("usage")) {
+        m_liveTokens = e.value(QStringLiteral("tokens")).toLongLong();
+        const QVariant cost = e.value(QStringLiteral("costUsd"));
+        m_liveCost = cost.isNull() ? -1.0 : cost.toDouble();
+        m_costEstimated = e.value(QStringLiteral("estimated")).toBool();
+        emit usageChanged();
+    } else if (type == QLatin1String("ready_for_changes")) {
+        // The build (or a round of changes) is done; the helper waits for more.
+        m_projectPath = str(e, "projectPath");
+        m_statusText = tr("Done");
+        setState(QStringLiteral("done"));
+        emit detailsChanged();
     } else if (type == QLatin1String("finished")) {
         m_projectPath = str(e, "projectPath");
         if (m_runFolder.isEmpty())
             m_runFolder = str(e, "runDir");
-        emit stateChanged();
+        emit detailsChanged();
     } else if (type == QLatin1String("error")) {
         m_errorText = str(e, "message");
         appendLog(QStringLiteral("error"), m_errorText);
-        emit stateChanged();
+        emit detailsChanged();
     }
+}
+
+// --- skills --------------------------------------------------------------------------------------
+
+QVariantMap ClaudeAgentController::skillByName(const QString &name) const
+{
+    for (const QVariant &v : m_skills) {
+        const QVariantMap s = v.toMap();
+        if (str(s, "name") == name)
+            return s;
+    }
+    return {};
+}
+
+void ClaudeAgentController::runSkillCommand(const QStringList &args, bool openAfter)
+{
+#if QT_CONFIG(process)
+    if (m_skillProc)
+        return;
+    const Launch launch = resolveLaunch();
+    if (!launch.error.isEmpty()) {
+        m_skillMessage = launch.error;
+        m_skillMessageIsError = true;
+        emit skillChanged();
+        return;
+    }
+    auto *proc = new QProcess(this);
+    m_skillProc = proc;
+    m_skillMessage.clear();
+    emit skillChanged();
+    proc->setWorkingDirectory(launch.workDir);
+    proc->setProgram(launch.program);
+    proc->setArguments(launch.args + QStringList{QStringLiteral("skill")} + args + QStringList{QStringLiteral("--json")});
+    connect(proc, &QProcess::finished, this, [this, proc, openAfter](int, QProcess::ExitStatus) {
+        QVariantMap reply;
+        for (const QByteArray &line : proc->readAllStandardOutput().split('\n')) {
+            const QJsonDocument doc = QJsonDocument::fromJson(line.trimmed());
+            if (doc.isObject())
+                reply = doc.object().toVariantMap();
+        }
+        const QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+        proc->deleteLater();
+        m_skillProc = nullptr;
+        const bool ok = reply.value(QStringLiteral("ok")).toBool();
+        m_skillMessageIsError = !ok;
+        if (!ok) {
+            m_skillMessage = reply.contains(QStringLiteral("error")) ? str(reply, "error") : err.right(300);
+        } else {
+            const QVariantMap skill = reply.value(QStringLiteral("skill")).toMap();
+            if (reply.contains(QStringLiteral("trashedTo")))
+                m_skillMessage = tr("Moved to %1").arg(QDir::toNativeSeparators(str(reply, "trashedTo")));
+            else if (openAfter && !skill.isEmpty())
+                m_skillMessage = tr("Opened %1. Save it, then reload.").arg(QDir::toNativeSeparators(str(skill, "file")));
+            else
+                m_skillMessage.clear();
+            if (openAfter && !skill.isEmpty()) {
+                const QUrl file = QUrl::fromLocalFile(str(skill, "file"));
+                if (!QDesktopServices::openUrl(file))
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(str(skill, "dir")));
+            }
+        }
+        emit skillChanged();
+        refresh();
+    });
+    proc->start();
+#else
+    Q_UNUSED(args);
+    Q_UNUSED(openAfter);
+#endif
+}
+
+void ClaudeAgentController::createSkill(const QString &name, const QString &description, const QStringList &sources)
+{
+    QStringList args{QStringLiteral("new"), name.trimmed(), QStringLiteral("--description"), description.trimmed()};
+    if (!sources.isEmpty())
+        args << QStringLiteral("--sources") << sources.join(QLatin1Char(','));
+    runSkillCommand(args, true);
+}
+
+void ClaudeAgentController::customizeSkill(const QString &name)
+{
+    runSkillCommand({QStringLiteral("customize"), name}, true);
+}
+
+void ClaudeAgentController::removeSkill(const QString &name)
+{
+    runSkillCommand({QStringLiteral("remove"), name}, false);
+}
+
+void ClaudeAgentController::setSkillEnabled(const QString &name, bool enabled)
+{
+    runSkillCommand({enabled ? QStringLiteral("enable") : QStringLiteral("disable"), name}, false);
+}
+
+void ClaudeAgentController::editSkill(const QString &name) const
+{
+    const QVariantMap s = skillByName(name);
+    if (s.isEmpty())
+        return;
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(str(s, "file"))))
+        QDesktopServices::openUrl(QUrl::fromLocalFile(str(s, "dir")));
+}
+
+void ClaudeAgentController::openSkillFolder(const QString &name) const
+{
+    const QVariantMap s = skillByName(name);
+    if (!s.isEmpty())
+        QDesktopServices::openUrl(QUrl::fromLocalFile(str(s, "dir")));
 }
 
 // --- helpers -------------------------------------------------------------------------------------

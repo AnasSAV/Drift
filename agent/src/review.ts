@@ -10,7 +10,7 @@ import type { Model } from "./claude.js";
 import { EFFORTS } from "./config.js";
 import { bold, dim, green, red } from "./events.js";
 import { ask, pickEffort, pickModel } from "./pick.js";
-import type { Review, Reviewer, RunControl } from "./run.js";
+import type { FollowUp, Review, Reviewer, RunControl } from "./run.js";
 import { parseStoryboard, renderStoryboard, type Storyboard } from "./storyboard.js";
 
 export class TerminalReviewer implements Reviewer {
@@ -68,6 +68,12 @@ export class TerminalReviewer implements Reviewer {
       }
     }
   }
+
+  async followUp(): Promise<FollowUp> {
+    console.log(dim("\nThe video is on the timeline. Keep editing it in Drift, and ask Claude for changes here."));
+    const note = (await ask(this.rl, `${bold("Changes?")} Describe them, or press Enter to finish › `)).trim();
+    return note ? { action: "change", note } : { action: "finish" };
+  }
 }
 
 // Blocks until the editor closes. $VISUAL / $EDITOR win; otherwise the platform's plain editor.
@@ -101,6 +107,8 @@ type ModelFields = { model?: string; effort?: string };
 type Command =
   | ({ type: "approve"; storyboard?: unknown } & ModelFields)
   | { type: "revise"; note: string }
+  | { type: "change"; note: string }
+  | { type: "finish" }
   | ({ type: "set_model" } & ModelFields)
   | { type: "cancel" };
 
@@ -158,6 +166,16 @@ export class JsonReviewer implements Reviewer {
         if (parsed.ok) return { action: "approve", storyboard: parsed.value };
         process.stdout.write(JSON.stringify({ type: "error", phase: "plan", message: parsed.error }) + "\n");
       }
+    }
+  }
+
+  // After the build: {"type":"change","note":…} for another round, {"type":"finish"} (or
+  // cancel) to end the run.
+  async followUp(): Promise<FollowUp> {
+    for (;;) {
+      const cmd = await this.next();
+      if (cmd.type === "finish" || cmd.type === "cancel") return { action: "finish" };
+      if ((cmd.type === "change" || cmd.type === "revise") && cmd.note?.trim()) return { action: "change", note: cmd.note.trim() };
     }
   }
 }

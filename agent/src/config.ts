@@ -14,9 +14,14 @@ export const EFFORTS: EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
 export interface Config {
   model?: string;
   effort?: EffortLevel;
+  // Skills hidden from pickers (guided mode, the Drift panel). `run --skill` still accepts them.
+  disabledSkills?: string[];
 }
 
-export const configFile = join(homedir(), ".drift-agent", "config.json");
+// ~/.drift-agent holds the config and the user's skills; DRIFT_AGENT_HOME moves it (tests use a
+// temp folder so they never touch the real one).
+export const agentHome = process.env.DRIFT_AGENT_HOME || join(homedir(), ".drift-agent");
+export const configFile = join(agentHome, "config.json");
 
 export function loadConfig(): Config {
   try {
@@ -24,6 +29,9 @@ export function loadConfig(): Config {
     return {
       model: typeof raw.model === "string" ? raw.model : undefined,
       effort: EFFORTS.includes(raw.effort as EffortLevel) ? raw.effort : undefined,
+      disabledSkills: Array.isArray(raw.disabledSkills)
+        ? raw.disabledSkills.filter((s): s is string => typeof s === "string")
+        : undefined,
     };
   } catch {
     return {};

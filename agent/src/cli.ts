@@ -30,7 +30,17 @@ import { bold, cyan, dim, green, JsonReporter, red, TerminalReporter, yellow, ty
 import { ask, pickEffort, pickModel } from "./pick.js";
 import { JsonReviewer, TerminalReviewer } from "./review.js";
 import { RunControl, runSkill, slug } from "./run.js";
-import { findSkill, listSkills, skillRoots, type Skill } from "./skills.js";
+import { createSkill, customizeSkill, isEnabled, removeSkill, setEnabled } from "./skillManager.js";
+import {
+  findSkill,
+  listSkills,
+  skillProblems,
+  skillRoots,
+  userSkillsDir,
+  type Skill,
+  type SkillEntry,
+  type SourceKind,
+} from "./skills.js";
 import { resolveSource } from "./sources.js";
 import { DRIFT } from "./policy.js";
 
@@ -40,6 +50,9 @@ ${bold("Usage")}
   drift-agent                             guided mode: pick a skill, source and model
   drift-agent run --skill <name> --source <path|url> [options]
   drift-agent skills                      list the skills you can use
+  drift-agent skill new <name>            make a skill from a template (--description, --sources)
+  drift-agent skill customize <name>      copy a built-in skill to your folder to change it
+  drift-agent skill enable|disable|remove <name>   manage your skills (remove goes to .trash)
   drift-agent model [id] [--effort <lvl>] show or change your default model
   drift-agent models [--json]             models your Claude account offers
   drift-agent info                        skills, models, default and login as JSON (for the panel)
@@ -80,6 +93,8 @@ async function main(): Promise<number> {
       yes: { type: "boolean", short: "y" },
       json: { type: "boolean" },
       console: { type: "boolean" },
+      description: { type: "string" },
+      sources: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
@@ -99,6 +114,8 @@ async function main(): Promise<number> {
       return cmdRun(values);
     case "skills":
       return cmdSkills();
+    case "skill":
+      return cmdSkill(positionals[1], positionals[2], values);
     case "model":
       return cmdModel(positionals[1], values.effort as string | undefined);
     case "models":
@@ -127,12 +144,84 @@ function cmdSkills(): number {
     return 1;
   }
   for (const s of skills) {
-    console.log(`${bold(s.name)}${s.sources.length ? dim(`  [${s.sources.join(", ")}]`) : ""}`);
+    const tags = [
+      s.origin === "bundled" ? "built-in" : s.origin === "user" ? (s.overridesBundled ? "yours, replaces built-in" : "yours") : "extra",
+      isEnabled(s.name) ? "" : "disabled",
+    ].filter(Boolean);
+    console.log(`${bold(s.name)}${s.sources.length ? dim(`  [${s.sources.join(", ")}]`) : ""}${dim(`  (${tags.join(", ")})`)}`);
     console.log(`  ${s.description}`);
     console.log(dim(`  ${s.dir}`));
   }
-  console.log(dim(`\nAdd your own: a folder with a SKILL.md in ${skillRoots()[skillRoots().length - 2]}`));
+  for (const p of skillProblems()) console.log(yellow(`! ${p.dir}: ${p.problem}`));
+  console.log(dim(`\nNew skill: drift-agent skill new <name>   ·   change a built-in one: drift-agent skill customize <name>`));
   return 0;
+}
+
+function skillJson(s: SkillEntry) {
+  return {
+    name: s.name,
+    description: s.description,
+    sources: s.sources,
+    model: s.model ?? null,
+    effort: s.effort ?? null,
+    dir: s.dir,
+    file: s.file,
+    origin: s.origin,
+    overridesBundled: s.overridesBundled,
+    enabled: isEnabled(s.name),
+  };
+}
+
+// drift-agent skill new|customize|remove|enable|disable|path <name>
+function cmdSkill(sub: string | undefined, name: string | undefined, values: Values): number {
+  const json = !!values.json;
+  const reply = (body: Record<string, unknown>, text: string) => {
+    if (json) process.stdout.write(JSON.stringify(body) + "\n");
+    else console.log(body.ok ? green(text) : red(text));
+    return body.ok ? 0 : 1;
+  };
+  if (!sub || !name) {
+    return reply(
+      { ok: false, error: "usage" },
+      "Usage: drift-agent skill new|customize|remove|enable|disable|path <name> [--description …] [--sources document,repo,video,url]",
+    );
+  }
+  try {
+    switch (sub) {
+      case "new": {
+        const sources = String(values.sources ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s): s is SourceKind => ["document", "repo", "video", "url"].includes(s));
+        const s = createSkill(name, String(values.description ?? ""), sources);
+        return reply({ ok: true, skill: skillJson(s) }, `Created ${s.file} — edit it to describe your video.`);
+      }
+      case "customize": {
+        const s = customizeSkill(name);
+        return reply({ ok: true, skill: skillJson(s) }, `Your copy: ${s.file} (it replaces the built-in one; remove it to go back).`);
+      }
+      case "remove": {
+        const r = removeSkill(name);
+        return reply(
+          { ok: true, trashedTo: r.trashedTo, restored: r.restored ? skillJson(r.restored) : null },
+          `Moved to ${r.trashedTo}${r.restored ? ` — the built-in ${name} is back` : ""}.`,
+        );
+      }
+      case "enable":
+      case "disable": {
+        setEnabled(name, sub === "enable");
+        return reply({ ok: true, skill: skillJson(findSkill(name)!) }, `${name} ${sub}d.`);
+      }
+      case "path": {
+        const s = findSkill(name);
+        if (!s) throw new Error(`No skill named "${name}".`);
+        return reply({ ok: true, skill: skillJson(s) }, s.file);
+      }
+    }
+    return reply({ ok: false, error: `Unknown skill command "${sub}".` }, `Unknown skill command "${sub}".`);
+  } catch (err) {
+    return reply({ ok: false, error: (err as Error).message }, (err as Error).message);
+  }
 }
 
 function cmdStatus(): number {
@@ -246,14 +335,8 @@ async function cmdModels(json: boolean): Promise<number> {
 // models, the saved default and who is logged in. Free (no prompt is sent).
 async function cmdInfo(): Promise<number> {
   const cfg = loadConfig();
-  const skills = listSkills().map((s) => ({
-    name: s.name,
-    description: s.description,
-    sources: s.sources,
-    model: s.model ?? null,
-    effort: s.effort ?? null,
-    dir: s.dir,
-  }));
+  const skills = listSkills().map(skillJson);
+  const problems = skillProblems();
   let account: { loggedIn: boolean; method: string | null } = { loggedIn: false, method: null };
   let models: Model[] = [];
   let error: string | null = null;
@@ -274,7 +357,8 @@ async function cmdInfo(): Promise<number> {
       default: { model: choice.model, effort: choice.effort },
       efforts: EFFORTS,
       account,
-      userSkillsDir: skillRoots()[skillRoots().length - 2],
+      userSkillsDir,
+      problems,
       error,
     }) + "\n",
   );
@@ -328,9 +412,9 @@ async function cmdModel(id: string | undefined, effortArg: string | undefined): 
 async function cmdGuided(): Promise<number> {
   console.log(bold("drift-agent") + dim(" — Claude builds a video in Drift. Ctrl+C to leave.\n"));
 
-  const skills = listSkills();
+  const skills = listSkills().filter((s) => isEnabled(s.name));
   if (!skills.length) {
-    console.log(red(`No skills found in ${skillRoots().join(", ")}.`));
+    console.log(red(`No enabled skills in ${skillRoots().join(", ")}.`));
     return 1;
   }
 

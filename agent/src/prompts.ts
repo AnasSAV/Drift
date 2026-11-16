@@ -139,6 +139,20 @@ export function revisePrompt(note: string): string {
   ].join("\n");
 }
 
+export function changePrompt(note: string, savePath: string): string {
+  return [
+    `The user wants changes to the video you built:`,
+    ``,
+    note,
+    ``,
+    `They may have edited the timeline by hand since your last turn. Start with`,
+    `inspect({clips:true}) and work from what is there now; keep their edits unless they ask`,
+    `otherwise. Make the changes (one apply batch per logical change, so each is one undo step),`,
+    `check the affected moments with frames({at:[…]}), then save_project({path:${JSON.stringify(savePath)}}).`,
+    `End with a short note of what changed.`,
+  ].join("\n");
+}
+
 export function buildPrompt(sb: Storyboard, edited: boolean, savePath: string): string {
   return [
     `BUILD phase. The user approved this storyboard` +

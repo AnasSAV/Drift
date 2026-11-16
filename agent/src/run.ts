@@ -17,7 +17,8 @@ import {
 import type { DriftInstance } from "./drift.js";
 import type { AgentEvent, Phase, Reporter } from "./events.js";
 import { DRIFT, makeCanUseTool, RESEARCH_OPS, STUDIO, SUBMIT_TOOL, type PolicyState } from "./policy.js";
-import { buildPrompt, planPrompt, revisePrompt, systemPrompt } from "./prompts.js";
+import { addUsage, estimateCost, totalTokens, zeroTokens, type Usage } from "./pricing.js";
+import { buildPrompt, changePrompt, planPrompt, revisePrompt, systemPrompt } from "./prompts.js";
 import type { Skill } from "./skills.js";
 import type { Source } from "./sources.js";
 import { storyboardShape, type Storyboard } from "./storyboard.js";
@@ -27,8 +28,13 @@ export type Review =
   | { action: "revise"; note: string }
   | { action: "cancel" };
 
+export type FollowUp = { action: "change"; note: string } | { action: "finish" };
+
 export interface Reviewer {
   review(storyboard: Storyboard, file: string): Promise<Review>;
+  // After the build: more changes to make on the timeline, or done. Without it the run ends
+  // after the first build.
+  followUp?(): Promise<FollowUp>;
 }
 
 // The model and effort for the next turn. Reviewers (the terminal's [m], the panel's set_model)
@@ -142,11 +148,40 @@ export async function runSkill(opts: RunOptions): Promise<RunResult> {
   let totalCost = 0;
   let announced = false;
   let lastModel = "";
+  // Tokens of finished turns; their cost is the exact figure in totalCost.
+  let doneTokens = zeroTokens();
+  let lastUsageKey = "";
 
   // Runs one turn and reports what happens in it. Returns the turn's final text, or undefined
   // when it failed (already reported).
   async function turn(prompt: string): Promise<string | undefined> {
     const toolNames = new Map<string, string>();
+    // Usage per API message: the SDK delivers one frame per content block, each repeating its
+    // message's usage, so keep the latest per message id rather than adding every frame.
+    const usageById = new Map<string, Usage>();
+    const turnTokens = () => [...usageById.values()].reduce(addUsage, zeroTokens());
+    const reportUsage = (exactTurnCost?: number) => {
+      const t = turnTokens();
+      const all = addUsage(doneTokens, {
+        input_tokens: t.input,
+        output_tokens: t.output,
+        cache_read_input_tokens: t.cacheRead,
+        cache_creation_input_tokens: t.cacheWrite,
+      });
+      const estimate = exactTurnCost ?? estimateCost(model, t);
+      const costUsd = estimate === undefined ? null : totalCost + estimate;
+      const key = `${totalTokens(all)}/${costUsd?.toFixed(4)}`;
+      if (key === lastUsageKey) return;
+      lastUsageKey = key;
+      emit({
+        type: "usage",
+        phase: state.phase,
+        tokens: totalTokens(all),
+        outputTokens: all.output,
+        costUsd,
+        estimated: exactTurnCost === undefined,
+      });
+    };
     const { model, effort } = opts.control;
     if (`${model}/${effort}` !== lastModel) {
       lastModel = `${model}/${effort}`;
@@ -175,6 +210,10 @@ export async function runSkill(opts: RunOptions): Promise<RunResult> {
           }
         } else if (msg.type === "assistant") {
           if (msg.parent_tool_use_id) continue;
+          if (msg.message.id && msg.message.usage) {
+            usageById.set(msg.message.id, msg.message.usage as Usage);
+            reportUsage();
+          }
           for (const block of msg.message.content) {
             if (block.type === "text") emit({ type: "text", phase: state.phase, text: block.text });
             else if (block.type === "tool_use") {
@@ -204,6 +243,16 @@ export async function runSkill(opts: RunOptions): Promise<RunResult> {
           }
         } else if (msg.type === "result") {
           sessionId = msg.session_id;
+          // From here on this turn is priced exactly.
+          const t = turnTokens();
+          lastUsageKey = "";
+          reportUsage(msg.total_cost_usd);
+          doneTokens = addUsage(doneTokens, {
+            input_tokens: t.input,
+            output_tokens: t.output,
+            cache_read_input_tokens: t.cacheRead,
+            cache_creation_input_tokens: t.cacheWrite,
+          });
           totalCost += msg.total_cost_usd;
           if (msg.subtype === "success" && !msg.is_error) {
             final = msg.result;
@@ -274,7 +323,23 @@ export async function runSkill(opts: RunOptions): Promise<RunResult> {
   state.storyboard = approved;
   const projectPath = join(runDir, `${slug(approved.title) || "video"}.drift`);
   emit({ type: "status", phase: "build", message: `Building "${approved.title}" in Drift…` });
-  const report = await turn(buildPrompt(approved, edited, projectPath));
+  let report = await turn(buildPrompt(approved, edited, projectPath));
+
+  // --- changes after the build -----------------------------------------------------------------
+  // The session stays open: Claude still knows the source and the storyboard, so "make the
+  // title bigger" or "swap scenes 2 and 3" is one more turn, not a new run.
+  if (report !== undefined && opts.reviewer.followUp) {
+    for (;;) {
+      emit({ type: "ready_for_changes", projectPath });
+      const next = await opts.reviewer.followUp();
+      if (next.action === "finish" || abort.signal.aborted) break;
+      emit({ type: "status", phase: "build", message: "Making your changes…" });
+      const reply = await turn(changePrompt(next.note, projectPath));
+      if (reply !== undefined) report = reply;
+      if (abort.signal.aborted) break;
+    }
+  }
+
   return {
     ok: report !== undefined,
     phase: "build",

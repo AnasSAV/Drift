@@ -20,6 +20,12 @@ export type AgentEvent =
   | { type: "tool"; phase: Phase; id: string; name: string; summary: string }
   | { type: "tool_result"; phase: Phase; id: string; ok: boolean; summary: string }
   | { type: "denied"; phase: Phase; name: string; reason: string }
+  // Running totals for the whole run. costUsd is exact for finished phases plus an estimate for
+  // the one in progress (estimated: true while any part is estimated); null when the model has
+  // no known price.
+  | { type: "usage"; phase: Phase; tokens: number; outputTokens: number; costUsd: number | null; estimated: boolean }
+  // A build (or follow-up) round finished; the session stays open for changes until "finish".
+  | { type: "ready_for_changes"; projectPath: string }
   | { type: "storyboard"; storyboard: Storyboard; file: string }
   | { type: "done"; phase: Phase; costUsd: number; turns: number; result: string }
   | { type: "finished"; ok: boolean; phase: Phase; costUsd: number; runDir: string; projectPath?: string; storyboardFile?: string }
@@ -76,7 +82,9 @@ export class TerminalReporter implements Reporter {
         // The reviewer prints the storyboard itself, with the approval prompt.
         break;
       case "finished":
-        // The CLI prints its own summary.
+      case "usage":
+      case "ready_for_changes":
+        // The CLI prints its own summary; usage would flood a terminal.
         break;
       case "done":
         this.totalCost += e.costUsd;
