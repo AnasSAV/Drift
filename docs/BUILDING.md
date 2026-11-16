@@ -103,6 +103,29 @@ Commit the updated `.ts` files. `.qm` binaries are compiled into the app and are
 
 MCP tool names, JSON schemas, agent errors, and copied `mcp.json` / agent-guide text stay English on purpose (`src/app/mcp/` is excluded from `lupdate`). The Settings “Agent access” labels are ordinary UI and are translated.
 
+## Windows
+
+You need Visual Studio 2022 or its Build Tools with the **Desktop development with C++**
+workload. It brings MSVC, the Windows SDK, CMake and Ninja. You also need git and Python 3. Two
+scripts mirror the Windows CI job (`.github/workflows/package.yml`):
+
+```powershell
+# Once: Qt 6.10.3 (C:\Qt), the pinned FFmpeg (.deps\ffmpeg), and zstd, OpenSSL, SoundTouch,
+# zlib and Skia through vcpkg (.\vcpkg). Skia compiles from source the first time (30–60 min).
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows-deps.ps1
+
+# Configure and build, then run it. RelWithDebInfo (full speed, with symbols) goes into
+# build-relwithdebinfo\; -Config Debug builds into build\, -Config Release into build-release\.
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+.\build-relwithdebinfo\drift.exe
+```
+
+`build-windows.ps1` loads the MSVC environment itself, so a plain PowerShell window works. It also
+copies the Qt, FFmpeg and vcpkg DLLs next to `drift.exe`. `-Target drift` builds only the app,
+`-Reconfigure` re-runs CMake, and `-NoSkia` skips Skia if you don't have it (text, shapes and
+vector clips then draw nothing). Every step of the setup script is skipped when its result is
+already there, so re-running it is cheap.
+
 ## macOS
 
 Everything above applies, with Homebrew supplying the dependencies:
@@ -270,7 +293,7 @@ This is local process control of the editor, not a sandbox. Any process on the m
 
 `drift --headless` instead runs the editor with no window and serves MCP itself — no editor, no token, no display needed for project edits. Rendering and export still want an OpenGL 3.3 context, so on a server run it as `QT_QPA_PLATFORM=xcb xvfb-run -a drift --headless`. See [MCP.md](MCP.md#headless) for the transports and flags.
 
-Agents should call `catalog`, then `toolbox`, then `apply` with a list of ops. `inspect({clips:true})` returns clip ids. `capture` returns a JPEG of the composition. See [AGENTS.md](../AGENTS.md) for the full agent guide. The `export` toolbox encodes the timeline (settings + `export({path})`).
+Agents should call `catalog`, then `toolbox`, then `apply` with a list of ops. `inspect({clips:true})` returns clip ids. `capture` returns a JPEG of the composition. See [MCP.md](MCP.md) for the full agent guide, and [agent/README.md](../agent/README.md) for the Claude panel and drift-agent. The `export` toolbox encodes the timeline (settings + `export({path})`).
 
 **Flatpak:** importing host files may fail unless you grant filesystem access:
 
@@ -299,19 +322,21 @@ Arguments for `renderframe`: `<project.json> <time_us> <output.png>`.
 ```
 src/
   core/           Domain model (Project, Track, Clip, Keyframe, Effect) — no GUI
-  engine/         FFmpeg: ClipReader, FrameCompositor, AudioMixer, EffectProcessor, Exporter
-  models/         QML-facing models: AppController, AssetLibrary, TimelineModel, ClipListModel
-  mcp/            Opt-in localhost MCP server (agent access)
-  playback/       PlaybackEngine, PlaybackClock, CompositorService
-  preview/        PreviewItem (QQuickItem → QSGTexture)
+  engine/         Decode, compositor, GPU effects, 2D/3D render, audio, encode, on-device ML (ml/)
+  app/            QML-facing controllers: editor/ (AppController), bin/, jobs/, online/
+    mcp/          Opt-in localhost MCP server (agent access)
+    claude/       The Claude panel's back end (drives agent/)
+  playback/       PlaybackEngine, PlaybackClock, preview pipeline
+  ui/             C++ Quick items: timeline, preview, keyframes, color
   qml/            UI panels and components
+agent/            drift-agent: Claude builds videos from skills (Node; see agent/README.md)
 tests/            Unit tests (ctest) + tests/data (signed addon fixture)
-tools/            Headless probe + renderframe
+tools/            Headless probe, renderframe and other CLI tools
 flatpak/          Flatpak / Flathub packaging
 packaging/arch/   PKGBUILD for the Arch package
 installer/windows/Inno Setup script for the Windows installer
-scripts/          Release-notes extraction and asset sync helpers
-cmake/            FindFFmpeg.cmake
+scripts/          Release, asset sync, and Windows setup/build helpers
+cmake/            Find modules (FFmpeg, ONNX Runtime, Skia, …)
 ```
 
 ## Releasing

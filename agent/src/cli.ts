@@ -42,6 +42,7 @@ ${bold("Usage")}
   drift-agent skills                      list the skills you can use
   drift-agent model [id] [--effort <lvl>] show or change your default model
   drift-agent models [--json]             models your Claude account offers
+  drift-agent info                        skills, models, default and login as JSON (for the panel)
   drift-agent login [--console]           sign in to Claude (--console: API billing)
   drift-agent logout                      sign out
   drift-agent doctor                      check Drift, Claude login and the MCP link (free)
@@ -102,6 +103,8 @@ async function main(): Promise<number> {
       return cmdModel(positionals[1], values.effort as string | undefined);
     case "models":
       return cmdModels(!!values.json);
+    case "info":
+      return cmdInfo();
     case "login":
       return cmdLogin(!!values.console);
     case "logout":
@@ -236,6 +239,45 @@ async function cmdModels(json: boolean): Promise<number> {
   for (const m of models) {
     console.log(`${m.id === current ? cyan("●") : " "} ${m.name.padEnd(12)} ${dim(`${m.id} · ${m.description}`)}`);
   }
+  return 0;
+}
+
+// Everything the Drift panel needs to draw its form, in one JSON line: skills, the account's
+// models, the saved default and who is logged in. Free (no prompt is sent).
+async function cmdInfo(): Promise<number> {
+  const cfg = loadConfig();
+  const skills = listSkills().map((s) => ({
+    name: s.name,
+    description: s.description,
+    sources: s.sources,
+    model: s.model ?? null,
+    effort: s.effort ?? null,
+    dir: s.dir,
+  }));
+  let account: { loggedIn: boolean; method: string | null } = { loggedIn: false, method: null };
+  let models: Model[] = [];
+  let error: string | null = null;
+  try {
+    const p = await probe();
+    account = { loggedIn: p.account.loggedIn, method: p.account.method ?? null };
+    models = p.models;
+  } catch (err) {
+    error = (err as Error).message;
+  }
+  const choice = chooseModel({}, {}, cfg);
+  process.stdout.write(
+    JSON.stringify({
+      type: "info",
+      version: 1,
+      skills,
+      models,
+      default: { model: choice.model, effort: choice.effort },
+      efforts: EFFORTS,
+      account,
+      userSkillsDir: skillRoots()[skillRoots().length - 2],
+      error,
+    }) + "\n",
+  );
   return 0;
 }
 
@@ -474,6 +516,15 @@ async function startRun(p: StartParams): Promise<number> {
       abort,
     });
 
+    reporter.emit({
+      type: "finished",
+      ok: result.ok,
+      phase: result.phase,
+      costUsd: result.costUsd,
+      runDir,
+      projectPath: result.projectPath,
+      storyboardFile: result.storyboardFile,
+    });
     if (!json) {
       console.log();
       if (result.ok && result.phase === "build") {

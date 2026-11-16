@@ -5,8 +5,16 @@ pick a **skill**, point it at a **source**, review the **storyboard** Claude pro
 approve it Claude builds the timeline. Everything it builds is ordinary Drift clips you can keep
 editing.
 
-This is phase 1: a command-line helper that drives a running Drift through its MCP server. Phase 2
-puts the same flow in a panel inside Drift (the `--json` mode below is the protocol it will use).
+You can use it two ways:
+
+- **Inside Drift**: the **Claude** panel (in the AI workspace, or add it to any layout). It runs
+  this helper for you over the `--json` protocol below. You pick a skill, a source, a model and an
+  effort, edit the storyboard scene by scene, and watch the build. The back end is
+  [src/app/claude/ClaudeAgentController](../src/app/claude/ClaudeAgentController.h). The panel
+  finds this folder next to the Drift build (or set `DRIFT_AGENT_DIR`) and needs Node.js and
+  `npm install` here.
+- **From a terminal**: the command-line helper below, which drives a running Drift through its
+  MCP server.
 
 ## Setup
 

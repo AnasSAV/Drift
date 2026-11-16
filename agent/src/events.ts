@@ -22,6 +22,7 @@ export type AgentEvent =
   | { type: "denied"; phase: Phase; name: string; reason: string }
   | { type: "storyboard"; storyboard: Storyboard; file: string }
   | { type: "done"; phase: Phase; costUsd: number; turns: number; result: string }
+  | { type: "finished"; ok: boolean; phase: Phase; costUsd: number; runDir: string; projectPath?: string; storyboardFile?: string }
   | { type: "error"; phase: Phase; message: string };
 
 export interface Reporter {
@@ -73,6 +74,9 @@ export class TerminalReporter implements Reporter {
         break;
       case "storyboard":
         // The reviewer prints the storyboard itself, with the approval prompt.
+        break;
+      case "finished":
+        // The CLI prints its own summary.
         break;
       case "done":
         this.totalCost += e.costUsd;

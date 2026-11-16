@@ -44,6 +44,7 @@ const PanelType kPanelTypes[] = {
     {"subtitleText", QT_TRANSLATE_NOOP("WorkspaceStore", "Subtitle text")},
     {"subtitleTiming", QT_TRANSLATE_NOOP("WorkspaceStore", "Subtitle timing")},
     {"undoHistory", QT_TRANSLATE_NOOP("WorkspaceStore", "History")},
+    {"claude", QT_TRANSLATE_NOOP("WorkspaceStore", "Claude")},
     {"agentLog", QT_TRANSLATE_NOOP("WorkspaceStore", "Agent Log")},
     {"agentViews", QT_TRANSLATE_NOOP("WorkspaceStore", "Agent Views")},
     {"audioSheet", QT_TRANSLATE_NOOP("WorkspaceStore", "Audio Sheet")},

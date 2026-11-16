@@ -1258,6 +1258,8 @@ target_sources(driftapp PRIVATE
     src/app/mcp/AgentImageLog.cpp
     src/app/mcp/McpController.h
     src/app/mcp/McpController.cpp
+    src/app/claude/ClaudeAgentController.h
+    src/app/claude/ClaudeAgentController.cpp
     src/app/editor/PreferencesController.h
     src/app/editor/PreferencesController.cpp
     src/app/GraphicsApiChoice.h
@@ -2047,6 +2049,7 @@ qt_add_qml_module(drift
         src/qml/components/panels/sourcelab/SourceLabProgressCard.qml
         src/qml/components/panels/sourcelab/SourceLabExportOptions.qml
         src/qml/components/panels/AgentLogPanel.qml
+        src/qml/components/panels/ClaudePanel.qml
         src/qml/components/panels/AgentViewsPanel.qml
         src/qml/components/panels/AudioSheetPanel.qml
         src/qml/components/ImageViewer.qml

@@ -22,7 +22,7 @@
             "split": "v",
             "sizes": [0.65, 0.35],
             "children": [
-              { "panels": [ { "type": "agentLog" }, { "type": "agentViews" } ], "active": 0 },
+              { "panels": [ { "type": "claude" }, { "type": "agentLog" }, { "type": "agentViews" } ], "active": 0 },
               { "panels": [ { "type": "undoHistory" } ], "active": 0 }
             ]
           }

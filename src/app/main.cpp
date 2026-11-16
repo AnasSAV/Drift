@@ -6,6 +6,7 @@
 #include "app/procedural/ProceduralHighlighter.h"
 #include "app/editor/ProjectFileController.h"
 #include "app/mcp/McpController.h"
+#include "app/claude/ClaudeAgentController.h"
 #include "engine/packages/assets/EmojiCatalog.h"
 #include "engine/packages/assets/FontCatalog.h"
 #include "engine/gpu/device/GpuDevice.h"
@@ -800,6 +801,7 @@ int main(int argc, char *argv[])
     static WorkspaceStore workspaceStore;
     static SearchIndex searchIndex;
     static ProceduralEditorController proceduralEditor(&editorState);
+    static ClaudeAgentController claudeAgent(&editorState);
     static drift::Haptics haptics;
     static drift::PointerDevices pointerDevices;
     editorState.setAddonManager(&addonManager);
@@ -811,6 +813,7 @@ int main(int argc, char *argv[])
     qmlRegisterSingletonInstance("Drift", 1, 0, "BinFolderModel", editorState.bin()->folderModel());
     qmlRegisterSingletonInstance("Drift", 1, 0, "EditorState", &editorState);
     qmlRegisterSingletonInstance("Drift", 1, 0, "ProceduralEditor", &proceduralEditor);
+    qmlRegisterSingletonInstance("Drift", 1, 0, "ClaudeAgent", &claudeAgent);
     qmlRegisterSingletonInstance("Drift", 1, 0, "AppController", &editorState);
     qmlRegisterSingletonInstance("Drift", 1, 0, "FileDialogs", &fileDialogs);
     qmlRegisterSingletonInstance("Drift", 1, 0, "Addons", &addonManager);
